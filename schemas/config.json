@@ -354,6 +354,10 @@
                   "cargoWorkspacePath": {
                     "description": "Path to the directory containing the workspace Cargo.toml. Defaults to the repository root.",
                     "type": "string"
+                  },
+                  "considerAllArtifacts": {
+                    "description": "Whether to analyze all crates in the workspace for cross-component version bumping. When false, only configured crates are considered. Defaults to `true`.",
+                    "type": "boolean"
                   }
                 }
               },
@@ -375,7 +379,7 @@
                     "type": "boolean"
                   },
                   "considerAllArtifacts": {
-                    "description": "Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.",
+                    "description": "Whether to analyze all packages in the workspace for cross-component version bumping. This option is supported by the cargo-workspace and maven-workspace plugins. Defaults to `true`.",
                     "type": "boolean"
                   }
                 }
@@ -398,7 +402,7 @@
                     "type": "boolean"
                   },
                   "considerAllArtifacts": {
-                    "description": "Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.",
+                    "description": "Whether to analyze all packages in the workspace for cross-component version bumping. This option is supported by the cargo-workspace and maven-workspace plugins. Defaults to `true`.",
                     "type": "boolean"
                   },
                   "updatePeerDependencies": {

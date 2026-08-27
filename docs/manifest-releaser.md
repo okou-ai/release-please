@@ -581,6 +581,23 @@ in a `crates/` subdirectory), you can specify the `cargoWorkspacePath` option:
 }
 ```
 
+By default, the plugin analyzes every crate in the Cargo workspace. If the
+workspace contains crates that are not configured for release, set
+`considerAllArtifacts` to `false` so that only configured crates participate in
+dependency propagation:
+
+```json
+{
+  "plugins": [
+    {
+      "type": "cargo-workspace",
+      "cargoWorkspacePath": "crates",
+      "considerAllArtifacts": false
+    }
+  ]
+}
+```
+
 ### maven-workspace
 
 The `maven-workspace` plugin operates similarly to the `node-workspace` plugin,

@@ -82,6 +82,7 @@ interface CrateInfo {
 
 interface CargoWorkspaceOptions extends WorkspacePluginOptions {
   cargoWorkspacePath?: string;
+  considerAllArtifacts?: boolean;
 }
 
 /**
@@ -95,6 +96,7 @@ export class CargoWorkspace extends WorkspacePlugin<CrateInfo> {
   private strategiesByPath: Record<string, Strategy> = {};
   private releasesByPath: Record<string, Release> = {};
   private workspacePath: string;
+  readonly considerAllArtifacts: boolean;
 
   constructor(
     github: GitHub,
@@ -108,6 +110,7 @@ export class CargoWorkspace extends WorkspacePlugin<CrateInfo> {
     this.workspacePath = (options.cargoWorkspacePath ?? '')
       .replace(/^\.\//, '')
       .replace(/\/+$/, '');
+    this.considerAllArtifacts = options.considerAllArtifacts ?? true;
   }
 
   private resolveWorkspacePath(file: string): string {
@@ -151,6 +154,18 @@ export class CargoWorkspace extends WorkspacePlugin<CrateInfo> {
 
     for (const path of members) {
       const manifestPath = addPath(path, 'Cargo.toml');
+      const config = this.repositoryConfig[path];
+      if (!config) {
+        if (!this.considerAllArtifacts) {
+          this.logger.info(
+            `path '${path}' not configured, ignoring '${manifestPath}'`
+          );
+          continue;
+        }
+        this.logger.info(
+          `path '${path}' not configured, but 'considerAllArtifacts' option enabled`
+        );
+      }
       this.logger.info(`looking for candidate with path: ${path}`);
       const candidate = candidates.find(c => c.path === path);
       // get original content of the crate

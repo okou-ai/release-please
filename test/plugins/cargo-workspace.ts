@@ -611,6 +611,97 @@ describe('CargoWorkspace plugin', () => {
       assertHasUpdate(updates, 'crates/packages/rustA/Cargo.toml');
       assertHasUpdate(updates, 'crates/Cargo.lock');
     });
+    it('ignores unconfigured Cargo workspace dependents', async () => {
+      const candidates: CandidateReleasePullRequest[] = [
+        buildMockCandidatePullRequest(
+          'crates/packages/rustA',
+          'rust',
+          '1.1.2',
+          {
+            component: 'pkgA',
+            updates: [
+              buildMockPackageUpdate(
+                'crates/packages/rustA/Cargo.toml',
+                'packages/rustA/Cargo.toml'
+              ),
+            ],
+          }
+        ),
+      ];
+      stubFilesFromFixtures({
+        sandbox,
+        github,
+        fixturePath: fixturesPath,
+        files: [],
+        flatten: false,
+        targetBranch: 'main',
+        inlineFiles: [
+          [
+            'crates/Cargo.toml',
+            '[workspace]\nmembers = ["packages/rustA", "packages/rustB"]',
+          ],
+          [
+            'crates/packages/rustA/Cargo.toml',
+            '[package]\nname = "pkgA"\nversion = "1.1.1"',
+          ],
+          [
+            'crates/packages/rustB/Cargo.toml',
+            '[package]\nname = "pkgB"\nversion = "2.2.2"\n\n[dev-dependencies]\npkgA = { version = "1.1.1", path = "../rustA" }',
+          ],
+        ],
+      });
+      sandbox
+        .stub(github, 'findFilesByGlobAndRef')
+        .withArgs('crates/packages/rustA', 'main')
+        .resolves(['crates/packages/rustA'])
+        .withArgs('crates/packages/rustB', 'main')
+        .resolves(['crates/packages/rustB']);
+      const options = {
+        cargoWorkspacePath: 'crates',
+        considerAllArtifacts: false,
+      };
+      plugin = new CargoWorkspace(
+        github,
+        'main',
+        {
+          'crates/packages/rustA': {
+            releaseType: 'rust',
+          },
+        },
+        options
+      );
+
+      const newCandidates = await plugin.run(candidates);
+
+      expect(newCandidates).lengthOf(1);
+      const updates = newCandidates[0].pullRequest.updates;
+      assertHasUpdate(updates, 'crates/packages/rustA/Cargo.toml');
+      assertNoHasUpdate(updates, 'crates/packages/rustB/Cargo.toml');
+      assertNoHasUpdate(updates, 'crates/packages/rustB/CHANGELOG.md');
+
+      const manifestUpdate = updates.find(
+        update => update.path === '.release-please-manifest.json'
+      );
+      expect(manifestUpdate).to.not.be.undefined;
+      const updatedManifest = JSON.parse(
+        manifestUpdate!.updater.updateContent(
+          '{"crates/packages/rustA":"1.1.1"}'
+        )
+      );
+      expect(updatedManifest).to.deep.equal({
+        'crates/packages/rustA': '1.1.1',
+      });
+
+      const lockUpdate = updates.find(
+        update => update.path === 'crates/Cargo.lock'
+      );
+      expect(lockUpdate).to.not.be.undefined;
+      const updatedLock = lockUpdate!.updater.updateContent(
+        '[[package]]\nname = "pkgA"\nversion = "1.1.1"\n\n[[package]]\nname = "pkgB"\nversion = "2.2.2"\n'
+      );
+      expect(updatedLock).to.include('name = "pkgA"\nversion = "1.1.2"');
+      expect(updatedLock).to.include('name = "pkgB"\nversion = "2.2.2"');
+    });
     it('walks dependency tree with non-root workspace path', async () => {
       const candidates: CandidateReleasePullRequest[] = [
         buildMockCandidatePullRequest(
