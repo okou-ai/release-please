@@ -78,9 +78,14 @@ export class Java extends BaseStrategy {
     latestRelease?: Release,
     draft?: boolean,
     labels: string[] = [],
-    _bumpOnlyOptions?: BumpReleaseOptions
+    bumpOnlyOptions?: BumpReleaseOptions
   ): Promise<ReleasePullRequest | undefined> {
-    if (await this.needsSnapshot(commits, latestRelease)) {
+    // A dependency-forced release must produce its publishable version, not
+    // the usual preparatory SNAPSHOT candidate.
+    if (
+      !bumpOnlyOptions &&
+      (await this.needsSnapshot(commits, latestRelease))
+    ) {
       this.logger.info('Repository needs a snapshot bump.');
       return await this.buildSnapshotPullRequest(
         latestRelease,
@@ -93,7 +98,8 @@ export class Java extends BaseStrategy {
       commits,
       latestRelease,
       draft,
-      labels
+      labels,
+      bumpOnlyOptions
     );
   }
 

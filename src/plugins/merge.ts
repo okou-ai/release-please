@@ -87,6 +87,10 @@ export class Merge extends ManifestPlugin {
       [[], []]
     );
 
+    if (inScopeCandidates.length === 0) {
+      return outOfScopeCandidates;
+    }
+
     const releaseData: ReleaseData[] = [];
     const labels = new Set<string>();
     let rawUpdates: Update[] = [];

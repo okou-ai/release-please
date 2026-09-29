@@ -89,12 +89,14 @@ export class PHPYoshi extends BaseStrategy {
       });
     });
 
-    const newVersion = latestRelease
-      ? await this.versioningStrategy.bump(
-          latestRelease.tag.version,
-          conventionalCommits
-        )
-      : this.initialReleaseVersion();
+    const newVersion =
+      bumpOnlyOptions?.newVersion ??
+      (latestRelease
+        ? await this.versioningStrategy.bump(
+            latestRelease.tag.version,
+            conventionalCommits
+          )
+        : this.initialReleaseVersion());
     const cs = new CommitSplit();
     const splitCommits = cs.split(conventionalCommits);
     const topLevelDirectories = Object.keys(splitCommits).sort();
@@ -235,6 +237,16 @@ export class PHPYoshi extends BaseStrategy {
       return undefined;
     }
     const component = await this.getComponent();
+    // A manifest PR carries one version per component. The historical PHP
+    // aggregate PR instead starts its notes with a top-level version heading
+    // before the individual module details; keep its legacy parsing.
+    const notesSection = pullRequestBody
+      .replace(/\r\n/g, '\n')
+      .split('\n---\n')[1]
+      ?.trimStart();
+    if (body.useComponents && !/^## \d+\.\d+\.\d+/.test(notesSection || '')) {
+      return body;
+    }
     const notes = body.releaseData
       .map(release => {
         return `<details><summary>${
