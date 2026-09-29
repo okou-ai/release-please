@@ -35,6 +35,7 @@ export interface WorkspacePluginOptions {
   manifestPath?: string;
   updateAllPackages?: boolean;
   merge?: boolean;
+  fallbackToFirstCandidate?: boolean;
   logger?: Logger;
 }
 
@@ -58,6 +59,7 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
   private updateAllPackages: boolean;
   private manifestPath: string;
   private merge: boolean;
+  private fallbackToFirstCandidate: boolean;
   constructor(
     github: GitHub,
     targetBranch: string,
@@ -68,6 +70,7 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
     this.manifestPath = options.manifestPath ?? DEFAULT_RELEASE_PLEASE_MANIFEST;
     this.updateAllPackages = options.updateAllPackages ?? false;
     this.merge = options.merge ?? true;
+    this.fallbackToFirstCandidate = options.fallbackToFirstCandidate ?? false;
   }
   async run(
     candidates: CandidateReleasePullRequest[]
@@ -171,7 +174,8 @@ export abstract class WorkspacePlugin<T> extends ManifestPlugin {
       const mergePlugin = new Merge(
         this.github,
         this.targetBranch,
-        this.repositoryConfig
+        this.repositoryConfig,
+        {fallbackToFirstCandidate: this.fallbackToFirstCandidate}
       );
       newCandidates = await mergePlugin.run(newCandidates);
     }

@@ -52,6 +52,33 @@ describe('schemas', () => {
       });
     }
 
+    it('validates directed cross-workspace release dependencies', () => {
+      const config = {
+        packages: {
+          'packages/tool': {'release-type': 'node'},
+          'crates/host': {'release-type': 'rust'},
+        },
+        plugins: [
+          {
+            type: 'release-dependencies',
+            rules: [
+              {
+                source: 'packages/tool',
+                dependent: 'crates/host',
+                minimumBump: 'patch',
+              },
+            ],
+          },
+        ],
+      };
+      expect(configValidator(config), JSON.stringify(configValidator.errors)).to
+        .be.true;
+      (config.plugins[0].rules[0] as Record<string, unknown>).inputPaths = [
+        'pnpm-lock.yaml',
+      ];
+      expect(configValidator(config)).to.be.false;
+    });
+
     it('rejects extra properties', () => {
       const config = {
         extraField: 'foo',

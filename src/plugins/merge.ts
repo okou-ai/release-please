@@ -33,6 +33,7 @@ export interface MergeOptions {
   componentNoSpace?: boolean;
   headBranchName?: string;
   forceMerge?: boolean;
+  fallbackToFirstCandidate?: boolean;
 }
 
 /**
@@ -48,6 +49,7 @@ export class Merge extends ManifestPlugin {
   private componentNoSpace?: boolean;
   private headBranchName?: string;
   private forceMerge: boolean;
+  private fallbackToFirstCandidate: boolean;
 
   constructor(
     github: GitHub,
@@ -63,6 +65,7 @@ export class Merge extends ManifestPlugin {
     this.componentNoSpace = options.componentNoSpace;
     this.headBranchName = options.headBranchName;
     this.forceMerge = options.forceMerge ?? false;
+    this.fallbackToFirstCandidate = options.fallbackToFirstCandidate ?? false;
   }
 
   async run(
@@ -87,6 +90,10 @@ export class Merge extends ManifestPlugin {
       [[], []]
     );
 
+    if (inScopeCandidates.length === 0) {
+      return outOfScopeCandidates;
+    }
+
     const releaseData: ReleaseData[] = [];
     const labels = new Set<string>();
     let rawUpdates: Update[] = [];
@@ -103,12 +110,15 @@ export class Merge extends ManifestPlugin {
       }
     }
     const updates = mergeUpdates(rawUpdates);
+    const primaryRelease =
+      rootRelease ??
+      (this.fallbackToFirstCandidate ? inScopeCandidates[0] : null);
 
     const pullRequest = {
       title: PullRequestTitle.ofComponentTargetBranchVersion(
-        rootRelease?.pullRequest.title.component,
+        primaryRelease?.pullRequest.title.component,
         this.targetBranch,
-        rootRelease?.pullRequest.title.version,
+        primaryRelease?.pullRequest.title.version,
         this.pullRequestTitlePattern,
         this.componentNoSpace
       ),
@@ -122,6 +132,9 @@ export class Merge extends ManifestPlugin {
       headRefName:
         this.headBranchName ??
         BranchName.ofTargetBranch(this.targetBranch).toString(),
+      version: this.fallbackToFirstCandidate
+        ? primaryRelease?.pullRequest.version
+        : undefined,
       draft: !candidates.some(candidate => !candidate.pullRequest.draft),
     };
 
