@@ -14,6 +14,7 @@
 
 import {
   LinkedVersionPluginConfig,
+  ReleaseDependenciesPluginConfig,
   PluginType,
   RepositoryConfig,
   SentenceCasePluginConfig,
@@ -22,6 +23,7 @@ import {
 import {GitHub} from '../github';
 import {ManifestPlugin} from '../plugin';
 import {LinkedVersions} from '../plugins/linked-versions';
+import {ReleaseDependencies} from '../plugins/release-dependencies';
 import {CargoWorkspace} from '../plugins/cargo-workspace';
 import {NodeWorkspace} from '../plugins/node-workspace';
 import {VersioningStrategyType} from './versioning-strategy-factory';
@@ -39,6 +41,7 @@ export interface PluginFactoryOptions {
   repositoryConfig: RepositoryConfig;
   manifestPath: string;
   separatePullRequests?: boolean;
+  fallbackToFirstCandidate?: boolean;
 
   // node options
   alwaysLinkLocal?: boolean;
@@ -54,6 +57,14 @@ export interface PluginFactoryOptions {
 export type PluginBuilder = (options: PluginFactoryOptions) => ManifestPlugin;
 
 const pluginFactories: Record<string, PluginBuilder> = {
+  'release-dependencies': options =>
+    new ReleaseDependencies(
+      options.github,
+      options.targetBranch,
+      options.repositoryConfig,
+      (options.type as ReleaseDependenciesPluginConfig).rules,
+      options.separatePullRequests
+    ),
   'linked-versions': options =>
     // NOTE: linked-versions had already have a different behavior about merging
     // see test/plugins/compatibility/linked-versions-workspace.ts
