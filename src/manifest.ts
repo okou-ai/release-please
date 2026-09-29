@@ -41,6 +41,7 @@ import {
   ConfigurationError,
 } from './errors';
 import {ManifestPlugin} from './plugin';
+import {ReleaseDependencies} from './plugins/release-dependencies';
 import {
   PullRequestOverflowHandler,
   FilePullRequestOverflowHandler,
@@ -249,6 +250,16 @@ export interface NodeWorkspacePluginConfig extends WorkspacePluginConfig {
 export interface CargoWorkspacePluginConfig extends WorkspacePluginConfig {
   cargoWorkspacePath?: string;
 }
+export interface ReleaseDependencyRule {
+  source: string;
+  dependent: string;
+  minimumBump?: 'patch' | 'minor' | 'major';
+}
+export interface ReleaseDependenciesPluginConfig
+  extends ConfigurablePluginType {
+  type: 'release-dependencies';
+  rules: ReleaseDependencyRule[];
+}
 export interface GroupPriorityPluginConfig extends ConfigurablePluginType {
   groups: string[];
 }
@@ -260,7 +271,8 @@ export type PluginType =
   | SentenceCasePluginConfig
   | WorkspacePluginConfig
   | NodeWorkspacePluginConfig
-  | CargoWorkspacePluginConfig;
+  | CargoWorkspacePluginConfig
+  | ReleaseDependenciesPluginConfig;
 
 /**
  * This is the schema of the manifest config json
@@ -642,14 +654,10 @@ export class Manifest {
     this.logger.debug(releaseShas);
     const expectedShas = releaseShas.size;
 
-    // sha => release pull request
-    const releasePullRequestsBySha: Record<string, PullRequest> = {};
     let releaseCommitsFound = 0;
     for await (const commit of commitGenerator) {
       if (releaseShas.has(commit.sha)) {
-        if (commit.pullRequest) {
-          releasePullRequestsBySha[commit.sha] = commit.pullRequest;
-        } else {
+        if (!commit.pullRequest) {
           this.logger.warn(
             `Release SHA ${commit.sha} did not have an associated pull request`
           );
@@ -739,64 +747,82 @@ export class Manifest {
       );
     }
 
-    let newReleasePullRequests: CandidateReleasePullRequest[] = [];
-    for (const path in this.repositoryConfig) {
-      const config = this.repositoryConfig[path];
-      this.logger.info(
-        `Building candidate release pull request for path: ${path}`
+    const releaseDependencies = this.plugins.filter(
+      (plugin): plugin is ReleaseDependencies =>
+        plugin instanceof ReleaseDependencies
+    );
+    if (releaseDependencies.length > 1) {
+      throw new ConfigurationError(
+        'Only one release-dependencies plugin may be configured',
+        'release-dependencies',
+        `${this.repository.owner}/${this.repository.repo}`
       );
-      this.logger.debug(`type: ${config.releaseType}`);
-      this.logger.debug(`targetBranch: ${this.targetBranch}`);
-      let pathCommits = parseConventionalCommits(
-        commitsPerPath[path],
-        this.logger
-      );
-      // The processCommits hook can be implemented by plugins to
-      // post-process commits. This can be used to perform cleanup, e.g,, sentence
-      // casing all commit messages:
-      for (const plugin of this.plugins) {
-        pathCommits = plugin.processCommits(pathCommits);
-      }
-      this.logger.debug(`commits: ${pathCommits.length}`);
-      const latestReleasePullRequest =
-        releasePullRequestsBySha[releaseShasByPath[path]];
-      if (!latestReleasePullRequest) {
-        this.logger.warn('No latest release pull request found.');
-      }
-
-      const strategy = strategies[path];
-      const latestRelease = releasesByPath[path];
-      const releasePullRequest = await strategy.buildReleasePullRequest(
-        pathCommits,
-        latestRelease,
-        config.draftPullRequest ?? this.draftPullRequest,
-        this.labels
-      );
-      if (releasePullRequest) {
-        // Update manifest, but only for valid release version - this will skip SNAPSHOT from java strategy
-        if (
-          releasePullRequest.version &&
-          isPublishedVersion(strategy, releasePullRequest.version)
-        ) {
-          const versionsMap: VersionsMap = new Map();
-          versionsMap.set(path, releasePullRequest.version);
-          releasePullRequest.updates.push({
-            path: this.manifestPath,
-            createIfMissing: false,
-            updater: new ReleasePleaseManifest({
-              version: releasePullRequest.version,
-              versionsMap,
-            }),
-          });
-        }
-        newReleasePullRequests.push({
-          path,
-          config,
-          pullRequest: releasePullRequest,
-        });
-      }
     }
+    // Rebuild candidates from their original commits when dependencies force a
+    // new version. Workspace plugins can themselves create source candidates,
+    // and can merge their candidates, so resolving only once before or after
+    // them would miss cross-workspace dependencies or downstream workspace bumps.
+    const buildCandidates = async (versionOverrides: Map<string, Version>) => {
+      const candidates: CandidateReleasePullRequest[] = [];
+      for (const path in this.repositoryConfig) {
+        const config = this.repositoryConfig[path];
+        let pathCommits = parseConventionalCommits(
+          commitsPerPath[path],
+          this.logger
+        );
+        for (const plugin of this.plugins) {
+          pathCommits = plugin.processCommits(pathCommits);
+        }
+        const strategy = strategies[path];
+        const releasePullRequest = await strategy.buildReleasePullRequest(
+          pathCommits,
+          releasesByPath[path],
+          config.draftPullRequest ?? this.draftPullRequest,
+          this.labels,
+          versionOverrides.has(path)
+            ? {newVersion: versionOverrides.get(path)!}
+            : undefined
+        );
+        if (releasePullRequest) {
+          if (
+            versionOverrides.has(path) &&
+            (!releasePullRequest.version ||
+              !isPublishedVersion(strategy, releasePullRequest.version))
+          ) {
+            throw new ConfigurationError(
+              `Forced release for ${path} has no publishable version`,
+              'release-dependencies',
+              `${this.repository.owner}/${this.repository.repo}`
+            );
+          }
+          if (
+            releasePullRequest.version &&
+            isPublishedVersion(strategy, releasePullRequest.version)
+          ) {
+            const versionsMap: VersionsMap = new Map();
+            versionsMap.set(path, releasePullRequest.version);
+            releasePullRequest.updates.push({
+              path: this.manifestPath,
+              createIfMissing: false,
+              updater: new ReleasePleaseManifest({
+                version: releasePullRequest.version,
+                versionsMap,
+              }),
+            });
+          }
+          candidates.push({path, config, pullRequest: releasePullRequest});
+        } else if (versionOverrides.has(path)) {
+          throw new ConfigurationError(
+            `Could not build forced release for ${path}`,
+            'release-dependencies',
+            `${this.repository.owner}/${this.repository.repo}`
+          );
+        }
+      }
+      return candidates;
+    };
 
+    const plugins = [...this.plugins];
     // Combine pull requests into 1 unless configured for separate
     // pull requests
     if (!this.separatePullRequests) {
@@ -826,7 +852,7 @@ export class Manifest {
           mergeOptions.componentNoSpace = config.componentNoSpace;
         }
       }
-      this.plugins.push(
+      plugins.push(
         new Merge(
           this.github,
           this.targetBranch,
@@ -836,13 +862,63 @@ export class Manifest {
       );
     }
 
-    for (const plugin of this.plugins) {
-      this.logger.debug(`running plugin: ${plugin.constructor.name}`);
-      newReleasePullRequests = await plugin.run(newReleasePullRequests);
+    const versionOverrides = new Map<string, Version>();
+    let previousReasons = new Map<string, string[]>();
+    for (
+      let pass = 0;
+      pass <= Object.keys(this.repositoryConfig).length * 2 + 1;
+      pass++
+    ) {
+      let candidates = await buildCandidates(versionOverrides);
+      for (const plugin of plugins) {
+        this.logger.debug(`running plugin: ${plugin.constructor.name}`);
+        candidates = await plugin.run(candidates);
+      }
+      const dependencyPlugin = releaseDependencies[0];
+      if (!dependencyPlugin) {
+        return candidates.map(candidate => candidate.pullRequest);
+      }
+      await dependencyPlugin.addNotes(candidates, previousReasons, strategies);
+      const resolution = await dependencyPlugin.resolve(candidates, {
+        releasesByPath,
+        releasedVersions: this.releasedVersions,
+        strategiesByPath: strategies,
+      });
+      let changed = false;
+      for (const [path, version] of resolution.versions) {
+        const previous = versionOverrides.get(path);
+        if (!previous || version.compare(previous) > 0) {
+          versionOverrides.set(path, version);
+          changed = true;
+        }
+      }
+      const reasons = [...resolution.reasons].map(([path, entries]) => [
+        path,
+        ...entries,
+      ]);
+      const oldReasons = [...previousReasons].map(([path, entries]) => [
+        path,
+        ...entries,
+      ]);
+      if (!changed && JSON.stringify(reasons) === JSON.stringify(oldReasons)) {
+        for (const [path, required] of versionOverrides) {
+          const observed = resolution.observedVersions.get(path);
+          if (!observed || observed.compare(required) < 0) {
+            throw new ConfigurationError(
+              `Required release for ${path} was filtered or is below ${required}`,
+              'release-dependencies',
+              `${this.repository.owner}/${this.repository.repo}`
+            );
+          }
+        }
+        return candidates.map(candidate => candidate.pullRequest);
+      }
+      previousReasons = resolution.reasons;
     }
-
-    return newReleasePullRequests.map(
-      pullRequestWithConfig => pullRequestWithConfig.pullRequest
+    throw new ConfigurationError(
+      'Release dependencies did not converge',
+      'release-dependencies',
+      `${this.repository.owner}/${this.repository.repo}`
     );
   }
 

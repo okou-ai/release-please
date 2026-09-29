@@ -2680,7 +2680,9 @@ describe('Manifest', () => {
       );
       const pullRequests = await manifest.buildPullRequests();
       expect(pullRequests).lengthOf(1);
-      expect(pullRequests[0].title.toString()).to.eql('chore(main): release v');
+      expect(pullRequests[0].title.toString()).to.eql(
+        'chore(main): release pkg1 v1.0.2'
+      );
     });
 
     it('should allow customizing pull request title without root package without space', async () => {
@@ -2777,7 +2779,9 @@ describe('Manifest', () => {
       );
       const pullRequests = await manifest.buildPullRequests();
       expect(pullRequests).lengthOf(1);
-      expect(pullRequests[0].title.toString()).to.eql('chore(main): release v');
+      expect(pullRequests[0].title.toString()).to.eql(
+        'chore(main): release pkg1 v1.0.2'
+      );
     });
 
     it('should read latest version from manifest if no release tag found', async () => {
