@@ -473,6 +473,14 @@ export class Manifest {
     path?: string,
     releaseAs?: string
   ): Promise<Manifest> {
+    if (
+      manifestOptionOverrides.releaseTargetSha !== undefined &&
+      (path !== undefined || releaseAs !== undefined)
+    ) {
+      throw new Error(
+        'Targeted recovery cannot override original release scope or version'
+      );
+    }
     const sourceRef = manifestOptionOverrides.releaseTargetSha || targetBranch;
     if (
       manifestOptionOverrides.releaseTargetSha !== undefined &&

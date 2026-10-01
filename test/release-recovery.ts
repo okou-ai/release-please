@@ -234,6 +234,38 @@ describe('source-bound release reconciliation', () => {
     const result = await manifest(github).reconcileReleases();
     expect(result[0].releaseStatus).equals('existing');
   });
+  it('rejects caller path/version overrides that could narrow the original full plan', async () => {
+    await rejected(
+      Manifest.fromManifest(
+        github,
+        'main',
+        undefined,
+        undefined,
+        {releaseTargetSha: source},
+        'packages/a'
+      ),
+      'cannot override'
+    );
+    await rejected(
+      Manifest.fromManifest(
+        github,
+        'main',
+        undefined,
+        undefined,
+        {releaseTargetSha: source},
+        undefined,
+        '9.0.0'
+      ),
+      'cannot override'
+    );
+    await rejected(
+      Manifest.fromManifest(github, 'main', undefined, undefined, {
+        releaseTargetSha: '',
+      }),
+      'Invalid release target'
+    );
+    sinon.assert.notCalled(create);
+  });
   it('prevents targeted mode from entering mutable legacy or release-PR generation', async () => {
     await rejected(manifest(github).createReleases(), 'reconcileReleases');
     await rejected(manifest(github).createPullRequests(), 'cannot create');
