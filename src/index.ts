@@ -20,6 +20,7 @@ export {
   PluginType,
   CandidateRelease,
   CreatedRelease,
+  ReconciledRelease,
 } from './manifest';
 export {ReleasePullRequest} from './release-pull-request';
 export {PullRequest} from './pull-request';

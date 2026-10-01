@@ -185,6 +185,7 @@ export interface GitHubRelease {
   notes?: string;
   url: string;
   draft?: boolean;
+  prerelease?: boolean;
   uploadUrl?: string;
 }
 
@@ -1379,6 +1380,195 @@ export class GitHub {
       prefix
     );
   }
+
+  /** Read the first parent of an exact commit, never a moving branch. */
+  getCommitParent = wrapAsync(
+    async (sha: string): Promise<string | undefined> => {
+      if (!/^[a-f0-9]{40}$/.test(sha))
+        throw new Error('Invalid release target SHA');
+      const response = await this.octokit.repos.getCommit({
+        owner: this.repository.owner,
+        repo: this.repository.repo,
+        ref: sha,
+      });
+      if (response.data.sha !== sha)
+        throw new Error('Release target identity mismatch');
+      const parent = response.data.parents[0]?.sha;
+      if (parent !== undefined && !/^[a-f0-9]{40}$/.test(parent)) {
+        throw new Error('Malformed release parent identity');
+      }
+      return parent;
+    }
+  );
+
+  /** Merged PRs associated with this exact source, independent of labels. */
+  releasePullRequestsForCommit = wrapAsync(
+    async (sha: string, baseBranch: string): Promise<PullRequest[]> => {
+      if (!/^[a-f0-9]{40}$/.test(sha))
+        throw new Error('Invalid release target SHA');
+      const response: {
+        repository?: {
+          object?: {
+            __typename: string;
+            oid: string;
+            associatedPullRequests: {
+              pageInfo: {hasNextPage: boolean};
+              nodes: Array<{
+                number: number;
+                title: string;
+                body: string;
+                state: string;
+                baseRefName: string;
+                headRefName: string;
+                mergeCommit: {oid: string} | null;
+                labels: {nodes: Array<{name: string}>};
+              }>;
+            };
+          } | null;
+        };
+      } = await this.graphqlRequest({
+        query: `query originalRelease($owner: String!, $repo: String!, $sha: String!) {
+        repository(owner: $owner, name: $repo) {
+          object(expression: $sha) { __typename ... on Commit { oid
+            associatedPullRequests(first: 100) { pageInfo {hasNextPage} nodes {
+              number title body state baseRefName headRefName mergeCommit {oid}
+              labels(first: 100) {nodes {name}}
+            }}
+          }}
+        }
+      }`,
+        owner: this.repository.owner,
+        repo: this.repository.repo,
+        sha,
+      });
+      const source = response.repository?.object;
+      if (!source || source.__typename !== 'Commit' || source.oid !== sha) {
+        throw new Error('Original release commit was not found');
+      }
+      if (source.associatedPullRequests.pageInfo.hasNextPage) {
+        throw new Error('Ambiguous original release pull requests');
+      }
+      return source.associatedPullRequests.nodes
+        .filter(
+          pr =>
+            pr.state === 'MERGED' &&
+            pr.baseRefName === baseBranch &&
+            pr.mergeCommit?.oid === sha
+        )
+        .map(pr => ({
+          number: pr.number,
+          title: pr.title,
+          body: pr.body,
+          baseBranchName: pr.baseRefName,
+          headBranchName: pr.headRefName,
+          mergeCommitOid: sha,
+          sha,
+          files: [],
+          labels: pr.labels.nodes.map(label => label.name),
+        }));
+    }
+  );
+
+  /** Only a genuine missing release is absence; provider failures propagate. */
+  getReleaseByTag = wrapAsync(
+    async (tagName: string): Promise<GitHubRelease | undefined> => {
+      try {
+        const response = await this.octokit.repos.getReleaseByTag({
+          owner: this.repository.owner,
+          repo: this.repository.repo,
+          tag: tagName,
+        });
+        const release = response.data;
+        if (
+          !Number.isSafeInteger(release.id) ||
+          release.id <= 0 ||
+          release.tag_name !== tagName ||
+          typeof release.html_url !== 'string' ||
+          !release.html_url ||
+          typeof release.draft !== 'boolean' ||
+          typeof release.prerelease !== 'boolean'
+        ) {
+          throw new Error('Malformed release metadata');
+        }
+        return {
+          id: release.id,
+          name: release.name || undefined,
+          tagName: release.tag_name,
+          sha: release.target_commitish,
+          notes: release.body || undefined,
+          url: release.html_url,
+          draft: release.draft,
+          prerelease: release.prerelease,
+          uploadUrl: release.upload_url,
+        };
+      } catch (error) {
+        if (error instanceof RequestError && error.status === 404)
+          return undefined;
+        throw error;
+      }
+    }
+  );
+
+  /** Reserve only the intended immutable tag before release creation. */
+  ensureTagCommit = wrapAsync(
+    async (tagName: string, sha: string): Promise<void> => {
+      if (!/^[a-f0-9]{40}$/.test(sha))
+        throw new Error('Invalid release target SHA');
+      const existing = await this.getTagCommit(tagName);
+      if (existing === sha) return;
+      if (existing) throw new Error(`Release tag source mismatch: ${tagName}`);
+      try {
+        await this.octokit.git.createRef({
+          owner: this.repository.owner,
+          repo: this.repository.repo,
+          ref: `refs/tags/${tagName}`,
+          sha,
+        });
+      } catch (error) {
+        if (!(error instanceof RequestError && error.status === 422))
+          throw error;
+      }
+      if ((await this.getTagCommit(tagName)) !== sha) {
+        throw new Error(`Release tag source mismatch: ${tagName}`);
+      }
+    }
+  );
+
+  /** Resolve lightweight/annotated tags to the real commit, with cycle bounds. */
+  getTagCommit = wrapAsync(
+    async (tagName: string): Promise<string | undefined> => {
+      let object: {type: string; sha: string};
+      try {
+        const response = await this.octokit.git.getRef({
+          owner: this.repository.owner,
+          repo: this.repository.repo,
+          ref: `tags/${tagName}`,
+        });
+        object = response.data.object;
+      } catch (error) {
+        if (error instanceof RequestError && error.status === 404)
+          return undefined;
+        throw error;
+      }
+      const seen = new Set<string>();
+      for (let depth = 0; depth < 6; depth++) {
+        if (!/^[a-f0-9]{40}$/.test(object.sha) || seen.has(object.sha)) {
+          throw new Error('Malformed or cyclic release tag identity');
+        }
+        seen.add(object.sha);
+        if (object.type === 'commit') return object.sha;
+        if (object.type !== 'tag')
+          throw new Error('Release tag does not point to a commit');
+        const response = await this.octokit.git.getTag({
+          owner: this.repository.owner,
+          repo: this.repository.repo,
+          tag_sha: object.sha,
+        });
+        object = response.data.object;
+      }
+      throw new Error('Release tag annotation depth exceeded');
+    }
+  );
 
   /**
    * Create a GitHub release

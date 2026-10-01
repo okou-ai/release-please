@@ -196,6 +196,10 @@ interface ReleaserConfigJson {
 }
 
 export interface ManifestOptions {
+  /** Opt-in recovery of an immutable original release source. */
+  releaseTargetSha?: string;
+  /** Complete intended paths; fromManifest derives these from the source delta. */
+  releasePlanPaths?: string[];
   bootstrapSha?: string;
   lastReleaseSha?: string;
   alwaysLinkLocal?: boolean;
@@ -320,7 +324,13 @@ export interface CreatedRelease extends GitHubRelease {
   prNumber: number;
 }
 
+export interface ReconciledRelease extends CreatedRelease {
+  releaseStatus: 'created' | 'existing';
+}
+
 export class Manifest {
+  private releaseTargetSha?: string;
+  private releasePlanPaths?: string[];
   private repository: Repository;
   private github: GitHub;
   readonly repositoryConfig: RepositoryConfig;
@@ -387,6 +397,14 @@ export class Manifest {
     releasedVersions: ReleasedVersions,
     manifestOptions?: ManifestOptions
   ) {
+    this.releaseTargetSha = manifestOptions?.releaseTargetSha;
+    this.releasePlanPaths = manifestOptions?.releasePlanPaths;
+    if (
+      this.releaseTargetSha !== undefined &&
+      !/^[a-f0-9]{40}$/.test(this.releaseTargetSha)
+    ) {
+      throw new Error('Invalid release target SHA');
+    }
     this.repository = github.repository;
     this.github = github;
     this.targetBranch = targetBranch;
@@ -455,13 +473,64 @@ export class Manifest {
     path?: string,
     releaseAs?: string
   ): Promise<Manifest> {
+    const sourceRef = manifestOptionOverrides.releaseTargetSha || targetBranch;
+    if (
+      manifestOptionOverrides.releaseTargetSha !== undefined &&
+      !/^[a-f0-9]{40}$/.test(manifestOptionOverrides.releaseTargetSha)
+    ) {
+      throw new Error('Invalid release target SHA');
+    }
     const [
       {config: repositoryConfig, options: manifestOptions},
       releasedVersions,
     ] = await Promise.all([
-      parseConfig(github, configFile, targetBranch, path, releaseAs),
-      parseReleasedVersions(github, manifestFile, targetBranch),
+      parseConfig(github, configFile, sourceRef, path, releaseAs),
+      parseReleasedVersions(github, manifestFile, sourceRef),
     ]);
+    let releasePlanPaths: string[] | undefined;
+    if (manifestOptionOverrides.releaseTargetSha) {
+      const parent = await github.getCommitParent(sourceRef);
+      let previousVersions: ReleasedVersions = {};
+      if (parent) {
+        try {
+          previousVersions = await parseReleasedVersions(
+            github,
+            manifestFile,
+            parent
+          );
+        } catch (error) {
+          if (!(error instanceof FileNotFoundError)) throw error;
+        }
+      }
+      releasePlanPaths = [];
+      for (const [candidatePath, version] of Object.entries(releasedVersions)) {
+        const config = repositoryConfig[candidatePath];
+        if (
+          !config ||
+          config.skipGithubRelease ||
+          previousVersions[candidatePath]?.toString() === version.toString()
+        )
+          continue;
+        const sourceStrategy = await buildStrategy({
+          ...config,
+          github,
+          path: candidatePath,
+          targetBranch: sourceRef,
+        });
+        if (!isPublishedVersion(sourceStrategy, version)) continue;
+        // Freeze identity at the source without replacing the semantic branch
+        // used by strategies to interpret the original release PR title.
+        const component = await sourceStrategy.getComponent();
+        repositoryConfig[candidatePath] = {
+          ...config,
+          component,
+          packageName: config.packageName ?? component ?? '',
+        };
+        releasePlanPaths.push(candidatePath);
+      }
+      if (!releasePlanPaths.length)
+        throw new Error('Original release plan is empty');
+    }
     return new Manifest(
       github,
       targetBranch,
@@ -471,6 +540,7 @@ export class Manifest {
         manifestPath: manifestFile,
         ...manifestOptions,
         ...manifestOptionOverrides,
+        ...(releasePlanPaths ? {releasePlanPaths} : {}),
       }
     );
   }
@@ -998,6 +1068,8 @@ export class Manifest {
    * @returns {PullRequest[]} Pull request numbers of release pull requests
    */
   async createPullRequests(): Promise<(PullRequest | undefined)[]> {
+    if (this.releaseTargetSha)
+      throw new Error('Targeted recovery cannot create release pull requests');
     const candidatePullRequests = await this.buildPullRequests();
     if (candidatePullRequests.length === 0) {
       return [];
@@ -1254,6 +1326,7 @@ export class Manifest {
    * @returns {CandidateRelease[]} List of release candidates
    */
   async buildReleases(): Promise<CandidateRelease[]> {
+    if (this.releaseTargetSha) return this.buildOriginalReleases();
     this.logger.info('Building releases');
     const strategiesByPath = await this.getStrategiesByPath();
 
@@ -1297,6 +1370,8 @@ export class Manifest {
    * @returns {GitHubRelease[]} List of created GitHub releases
    */
   async createReleases(): Promise<(CreatedRelease | undefined)[]> {
+    if (this.releaseTargetSha)
+      throw new Error('Use reconcileReleases for targeted recovery');
     const releasesByPullRequest: Record<number, CandidateRelease[]> = {};
     const pullRequestsByNumber: Record<number, PullRequest> = {};
     for (const release of await this.buildReleases()) {
@@ -1330,6 +1405,160 @@ export class Manifest {
       }
       const releases = await Promise.all(promises);
       return releases.reduce((collection, r) => collection.concat(r), []);
+    }
+  }
+
+  private async buildOriginalReleases(): Promise<CandidateRelease[]> {
+    const sha = this.releaseTargetSha!;
+    const expectedPaths = this.releasePlanPaths;
+    if (
+      !expectedPaths?.length ||
+      new Set(expectedPaths).size !== expectedPaths.length
+    ) {
+      throw new Error('A complete original release plan is required');
+    }
+    const strategies = await this.getStrategiesByPath();
+    const originals = await this.github.releasePullRequestsForCommit(
+      sha,
+      this.targetBranch
+    );
+    const plans: CandidateRelease[][] = [];
+    for (const original of originals) {
+      if (
+        original.mergeCommitOid !== sha ||
+        original.baseBranchName !== this.targetBranch
+      ) {
+        throw new Error('Original release pull request identity mismatch');
+      }
+      const body = await this.pullRequestOverflowHandler.parseOverflow(
+        original
+      );
+      if (!body) continue;
+      const pullRequest = {...original, body: body.toString()};
+      const plan: CandidateRelease[] = [];
+      for (const candidatePath of expectedPaths) {
+        const config = this.repositoryConfig[candidatePath];
+        const version = this.releasedVersions[candidatePath];
+        if (!config || !version || config.skipGithubRelease)
+          throw new Error('Invalid original release plan path');
+        const releases = await strategies[candidatePath].buildReleases(
+          pullRequest,
+          {
+            groupPullRequestTitlePattern: this.groupPullRequestTitlePattern,
+          }
+        );
+        for (const release of releases) {
+          if (
+            release.sha !== sha ||
+            release.tag.version.toString() !== version.toString()
+          ) {
+            throw new Error('Original release source or version mismatch');
+          }
+          plan.push({
+            ...release,
+            path: candidatePath,
+            pullRequest,
+            draft: config.draft ?? this.draft,
+            forceTag: config.forceTag,
+            prerelease:
+              !!config.prerelease &&
+              (!!release.tag.version.preRelease ||
+                release.tag.version.major === 0),
+          });
+        }
+      }
+      if (
+        plan.length === expectedPaths.length &&
+        new Set(plan.map(item => item.path)).size === expectedPaths.length
+      ) {
+        plans.push(plan);
+      }
+    }
+    if (plans.length !== 1)
+      throw new Error('Missing or ambiguous complete original release plan');
+    if (
+      new Set(plans[0].map(item => item.tag.toString())).size !==
+      expectedPaths.length
+    ) {
+      throw new Error('Duplicate tags in original release plan');
+    }
+    return plans[0];
+  }
+
+  /** Reconcile all original components; legacy creation outputs remain unchanged. */
+  async reconcileReleases(): Promise<ReconciledRelease[]> {
+    if (!this.releaseTargetSha)
+      throw new Error('Targeted recovery requires a release target SHA');
+    const candidates = await this.buildOriginalReleases();
+    // Validate every existing identity before creating any missing component.
+    const existing = new Map<string, GitHubRelease>();
+    for (const candidate of candidates) {
+      const tagName = candidate.tag.toString();
+      const commit = await this.github.getTagCommit(tagName);
+      const release = await this.github.getReleaseByTag(tagName);
+      if (commit && commit !== this.releaseTargetSha)
+        throw new Error(`Release tag source mismatch: ${tagName}`);
+      if (release) {
+        this.verifyReadyRelease(candidate, release, commit);
+        existing.set(tagName, release);
+      }
+    }
+    const ready: ReconciledRelease[] = [];
+    for (const candidate of candidates) {
+      const tagName = candidate.tag.toString();
+      let release = existing.get(tagName);
+      let releaseStatus: ReconciledRelease['releaseStatus'] = 'existing';
+      if (!release) {
+        await this.github.ensureTagCommit(tagName, this.releaseTargetSha);
+        try {
+          await this.github.createRelease(candidate, {
+            draft: candidate.draft,
+            prerelease: candidate.prerelease,
+            forceTag: candidate.forceTag,
+          });
+          releaseStatus = 'created';
+        } catch (error) {
+          if (!(error instanceof DuplicateReleaseError)) throw error;
+        }
+        release = await this.github.getReleaseByTag(tagName);
+        const commit = await this.github.getTagCommit(tagName);
+        if (!release) throw new Error(`Release readback missing: ${tagName}`);
+        this.verifyReadyRelease(candidate, release, commit);
+      }
+      ready.push({
+        ...release,
+        sha: this.releaseTargetSha,
+        path: candidate.path,
+        version: candidate.tag.version.toString(),
+        major: candidate.tag.version.major,
+        minor: candidate.tag.version.minor,
+        patch: candidate.tag.version.patch,
+        prNumber: candidate.pullRequest.number,
+        releaseStatus,
+      });
+    }
+    const original = candidates[0].pullRequest;
+    if (!this.skipLabeling) {
+      await this.github.removeIssueLabels(this.labels, original.number);
+      await this.github.addIssueLabels(this.releaseLabels, original.number);
+    }
+    return ready;
+  }
+
+  private verifyReadyRelease(
+    candidate: CandidateRelease,
+    release: GitHubRelease,
+    commit: string | undefined
+  ): void {
+    if (
+      release.tagName !== candidate.tag.toString() ||
+      commit !== this.releaseTargetSha ||
+      !!release.draft !== !!candidate.draft ||
+      !!release.prerelease !== !!candidate.prerelease
+    ) {
+      throw new Error(
+        `Release readiness identity mismatch: ${candidate.tag.toString()}`
+      );
     }
   }
 
