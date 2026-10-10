@@ -8,7 +8,7 @@ exports['GoYoshi buildReleasePullRequest combines google-api-go-client autogener
 
 ### Features
 
-* **all:** auto-regenerate discovery clients, refs [#1281](https://github.com/googleapis/google-api-go-client/issues/1281) [#1280](https://github.com/googleapis/google-api-go-client/issues/1280) [#1279](https://github.com/googleapis/google-api-go-client/issues/1279) [#1278](https://github.com/googleapis/google-api-go-client/issues/1278)
+* **all:** auto-regenerate discovery clients [#1281](https://github.com/googleapis/google-api-go-client/issues/1281) [#1280](https://github.com/googleapis/google-api-go-client/issues/1280) [#1279](https://github.com/googleapis/google-api-go-client/issues/1279) [#1278](https://github.com/googleapis/google-api-go-client/issues/1278)
 
 ---
 This PR was generated with [Release Please](https://github.com/googleapis/release-please). See [documentation](https://github.com/googleapis/release-please#release-please).

@@ -18,6 +18,8 @@ import {
   BuildNotesOptions,
 } from '../changelog-notes';
 import {ConventionalCommit} from '../commit';
+import {readFileSync} from 'fs';
+import {resolve} from 'path';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const conventionalChangelogWriter = require('conventional-changelog-writer');
@@ -38,12 +40,17 @@ interface Note {
 
 export class DefaultChangelogNotes implements ChangelogNotes {
   // allow for customized commit template.
-  private commitPartial?: string;
+  private commitPartial: string;
   private headerPartial?: string;
   private mainTemplate?: string;
 
   constructor(options: DefaultChangelogNotesOptions = {}) {
-    this.commitPartial = options.commitPartial;
+    this.commitPartial =
+      options.commitPartial ||
+      readFileSync(
+        resolve(__dirname, '../../../templates/default-commit.hbs'),
+        'utf8'
+      );
     this.headerPartial = options.headerPartial;
     this.mainTemplate = options.mainTemplate;
   }
@@ -67,11 +74,7 @@ export class DefaultChangelogNotes implements ChangelogNotes {
       config.types = options.changelogSections;
     }
     const preset = await presetFactory(config);
-    // Replace the default ", closes" keyword with ", refs" to prevent GitHub from
-    // automatically closing referenced issues when the release PR is merged.
-    preset.writerOpts.commitPartial =
-      this.commitPartial ||
-      preset.writerOpts.commitPartial?.replace(/,\s*closes/g, ', refs');
+    preset.writerOpts.commitPartial = this.commitPartial;
     preset.writerOpts.headerPartial =
       this.headerPartial || preset.writerOpts.headerPartial;
     preset.writerOpts.mainTemplate =
