@@ -143,7 +143,7 @@ describe('DefaultChangelogNotes', () => {
             notesOptions
           );
           expect(notes).to.include(
-            'refs [#1234](https://github.com/googleapis/java-asset/issues/1234)'
+            ') [#1234](https://github.com/googleapis/java-asset/issues/1234)'
           );
           expect(notes).not.to.match(
             /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+\[#1234\]/i
@@ -158,7 +158,7 @@ describe('DefaultChangelogNotes', () => {
           notesOptions
         );
         expect(notes).to.include(
-          'refs [#1234](https://github.com/googleapis/java-asset/issues/1234) ' +
+          ') [#1234](https://github.com/googleapis/java-asset/issues/1234) ' +
             '[#5678](https://github.com/googleapis/java-asset/issues/5678)'
         );
         expect(notes).not.to.match(
@@ -177,6 +177,43 @@ describe('DefaultChangelogNotes', () => {
         expect(notes).to.include('* custom some bugfix');
         expect(notes).not.to.include('#1234');
       });
+      it('uses the configured host for commit and issue links', async () => {
+        const commit = buildMockCommit('fix: some bugfix\n\nRefs #1234');
+        const notes = await new DefaultChangelogNotes().buildNotes(
+          parseConventionalCommits([commit]),
+          {...notesOptions, host: 'https://github.example.com'}
+        );
+        expect(notes).to.include(
+          `(https://github.example.com/googleapis/java-asset/commit/${commit.sha})`
+        );
+        expect(notes).to.include(
+          ') [#1234](https://github.example.com/googleapis/java-asset/issues/1234)'
+        );
+      });
+      for (const owner of ['other-owner', undefined]) {
+        it(`keeps cross-repository references with owner ${owner}`, async () => {
+          const [commit] = parseConventionalCommits([
+            buildMockCommit('fix: some bugfix\n\nRefs #1234'),
+          ]);
+          const notes = await new DefaultChangelogNotes().buildNotes(
+            [
+              {
+                ...commit,
+                references: [
+                  {...commit.references[0], owner, repository: 'other-repo'},
+                ],
+              },
+            ],
+            notesOptions
+          );
+          const label = owner ? `${owner}/other-repo` : 'other-repo';
+          expect(notes).to.include(
+            `) [${label}#1234](https://github.com/${
+              owner || notesOptions.owner
+            }/other-repo/issues/1234)`
+          );
+        });
+      }
       it('should handle a breaking change', async () => {
         const commits = [buildMockCommit('fix!: some bugfix')];
         const changelogNotes = new DefaultChangelogNotes();
