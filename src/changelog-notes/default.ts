@@ -18,8 +18,9 @@ import {
   BuildNotesOptions,
 } from '../changelog-notes';
 import {ConventionalCommit} from '../commit';
-import {readFileSync} from 'fs';
-import {resolve} from 'path';
+// Namespace imports let ncc include the template in the Action bundle.
+import * as fs from 'fs';
+import * as path from 'path';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const conventionalChangelogWriter = require('conventional-changelog-writer');
@@ -47,8 +48,8 @@ export class DefaultChangelogNotes implements ChangelogNotes {
   constructor(options: DefaultChangelogNotesOptions = {}) {
     this.commitPartial =
       options.commitPartial ||
-      readFileSync(
-        resolve(__dirname, '../../../templates/default-commit.hbs'),
+      fs.readFileSync(
+        path.resolve(__dirname, '../../../templates/default-commit.hbs'),
         'utf8'
       );
     this.headerPartial = options.headerPartial;
