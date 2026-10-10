@@ -127,6 +127,56 @@ describe('DefaultChangelogNotes', () => {
       safeSnapshot(notes);
     });
     describe('with commit parsing', () => {
+      for (const footer of [
+        'Refs #1234',
+        'Refs: #1234',
+        'ref #1234',
+        'Closes #1234',
+        'Fixes #1234',
+        'Resolves #1234',
+      ]) {
+        it(`renders ${footer} without closing the issue`, async () => {
+          const notes = await new DefaultChangelogNotes().buildNotes(
+            parseConventionalCommits([
+              buildMockCommit(`fix: some bugfix\n\n${footer}`),
+            ]),
+            notesOptions
+          );
+          expect(notes).to.include(
+            'refs [#1234](https://github.com/googleapis/java-asset/issues/1234)'
+          );
+          expect(notes).not.to.match(
+            /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+\[#1234\]/i
+          );
+        });
+      }
+      it('keeps multiple issue links without closing the issues', async () => {
+        const notes = await new DefaultChangelogNotes().buildNotes(
+          parseConventionalCommits([
+            buildMockCommit('fix: some bugfix\n\nRefs #1234\nRefs #5678'),
+          ]),
+          notesOptions
+        );
+        expect(notes).to.include(
+          'refs [#1234](https://github.com/googleapis/java-asset/issues/1234) ' +
+            '[#5678](https://github.com/googleapis/java-asset/issues/5678)'
+        );
+        expect(notes).not.to.match(
+          /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+\[#\d+\]/i
+        );
+      });
+      it('keeps the explicitly supplied commit template', async () => {
+        const notes = await new DefaultChangelogNotes({
+          commitPartial: '* custom {{subject}}\n',
+        }).buildNotes(
+          parseConventionalCommits([
+            buildMockCommit('fix: some bugfix\n\nRefs #1234'),
+          ]),
+          notesOptions
+        );
+        expect(notes).to.include('* custom some bugfix');
+        expect(notes).not.to.include('#1234');
+      });
       it('should handle a breaking change', async () => {
         const commits = [buildMockCommit('fix!: some bugfix')];
         const changelogNotes = new DefaultChangelogNotes();
