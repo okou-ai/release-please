@@ -720,6 +720,25 @@ export class LocalGitHub implements Scm {
     }
   }
 
+  async getTagByName(tagName: string): Promise<ScmTag | undefined> {
+    const ref = `refs/tags/${tagName}`;
+    const references = await execFile(
+      'git',
+      ['for-each-ref', '--format=%(refname)', ref],
+      {cwd: this.cloneDir}
+    );
+    if (!references.stdout.split(/\r?\n/).includes(ref)) {
+      // A shallow clone may not contain the expected release tag.
+      return this.gitHubApi.getTagByName(tagName);
+    }
+    const {stdout} = await execFile(
+      'git',
+      ['rev-parse', '--verify', `${ref}^{commit}`],
+      {cwd: this.cloneDir}
+    );
+    return {name: tagName, sha: stdout.trim()};
+  }
+
   /**
    * Open a pull request
    *

@@ -25,6 +25,7 @@ import * as codeSuggester from '../src/util/code-suggester';
 
 import {GitHub, GitHubRelease} from '../src/github';
 import {GitHubApi, GH_API_URL} from '../src/github-api';
+import * as githubApiModule from '../src/github-api';
 import {PullRequest} from '../src/pull-request';
 import {TagName} from '../src/util/tag-name';
 import {Version} from '../src/version';
@@ -1212,6 +1213,172 @@ describe('GitHub', () => {
         pullRequestOverflowHandler,
       });
       sinon.assert.calledOnce(handleOverflowStub);
+      req.done();
+    });
+  });
+
+  describe('getTagByName', () => {
+    const tagName = '@scope/pkg-v1.0.0';
+    const refPath = `/repos/fake/fake/git/ref/tags/${tagName}`;
+    const commit = {type: 'commit', sha: 'commit-sha'};
+
+    beforeEach(() => {
+      sandbox.stub(githubApiModule, 'sleepInMs').resolves();
+    });
+
+    function tagRef() {
+      return req.get(uri => decodeURIComponent(uri) === refPath);
+    }
+
+    it('looks up an exact scoped lightweight tag without listing tags', async () => {
+      const tagIterator = sandbox
+        .stub(github, 'tagIterator')
+        .throws(new Error('Unexpected tag enumeration'));
+      tagRef().reply(200, {ref: `refs/tags/${tagName}`, object: commit});
+      expect(await github.getTagByName(tagName)).to.eql({
+        name: tagName,
+        sha: commit.sha,
+      });
+      sinon.assert.notCalled(tagIterator);
+      req.done();
+    });
+
+    for (const depth of [1, 2]) {
+      it(`peels ${depth} annotated tag objects to the commit`, async () => {
+        tagRef().reply(200, {
+          ref: `refs/tags/${tagName}`,
+          object: {type: 'tag', sha: 'annotation-0'},
+        });
+        for (let index = 0; index < depth; index++) {
+          req.get(`/repos/fake/fake/git/tags/annotation-${index}`).reply(200, {
+            object:
+              index + 1 === depth
+                ? commit
+                : {type: 'tag', sha: `annotation-${index + 1}`},
+          });
+        }
+        expect(await github.getTagByName(tagName)).to.eql({
+          name: tagName,
+          sha: commit.sha,
+        });
+        req.done();
+      });
+    }
+
+    it('returns undefined for an absent tag ref', async () => {
+      tagRef().reply(404, {message: 'Not Found'});
+      expect(await github.getTagByName(tagName)).to.be.undefined;
+      req.done();
+    });
+
+    it('propagates a missing annotated object instead of treating the tag as absent', async () => {
+      tagRef().reply(200, {
+        ref: `refs/tags/${tagName}`,
+        object: {type: 'tag', sha: 'missing-annotation'},
+      });
+      req
+        .get('/repos/fake/fake/git/tags/missing-annotation')
+        .reply(404, {message: 'Not Found'});
+      await assert.rejects(
+        github.getTagByName(tagName),
+        (error: Error) =>
+          error instanceof GitHubAPIError &&
+          error.status === 404 &&
+          error.message.includes(tagName)
+      );
+      req.done();
+    });
+
+    for (const status of [401, 403, 422, 429]) {
+      it(`propagates HTTP ${status} without retrying`, async () => {
+        tagRef().reply(status, {message: 'Tag read denied'});
+        await assert.rejects(
+          github.getTagByName(tagName),
+          (error: Error) =>
+            error instanceof GitHubAPIError && error.status === status
+        );
+        req.done();
+      });
+    }
+
+    for (const status of [500, 502, 503, 504]) {
+      it(`recovers from a transient HTTP ${status} tag read`, async () => {
+        tagRef().reply(status, 'Temporary failure');
+        tagRef().reply(200, {ref: `refs/tags/${tagName}`, object: commit});
+        expect(await github.getTagByName(tagName)).to.eql({
+          name: tagName,
+          sha: commit.sha,
+        });
+        req.done();
+      });
+    }
+
+    it('retries annotated tag reads without fetching the successful ref again', async () => {
+      tagRef().reply(200, {
+        ref: `refs/tags/${tagName}`,
+        object: {type: 'tag', sha: 'annotation'},
+      });
+      req
+        .get('/repos/fake/fake/git/tags/annotation')
+        .reply(503, 'Temporary failure')
+        .get('/repos/fake/fake/git/tags/annotation')
+        .reply(200, {object: commit});
+      expect(await github.getTagByName(tagName)).to.eql({
+        name: tagName,
+        sha: commit.sha,
+      });
+      req.done();
+    });
+
+    it('stops after three reads and reports an empty error response with context', async () => {
+      tagRef()
+        .times(3)
+        .reply(503, '', {'x-github-request-id': 'test-request-id'});
+      await assert.rejects(
+        github.getTagByName(tagName),
+        (error: Error) =>
+          error instanceof GitHubAPIError &&
+          error.status === 503 &&
+          error.message.includes(tagName) &&
+          error.message.includes('test-request-id') &&
+          error.message.includes('empty error response')
+      );
+      req.done();
+    });
+
+    it('rejects a response for a different tag', async () => {
+      tagRef().reply(200, {ref: 'refs/tags/other', object: commit});
+      await assert.rejects(
+        github.getTagByName(tagName),
+        /Unexpected reference/
+      );
+      req.done();
+    });
+
+    it('rejects tags that point to blobs', async () => {
+      tagRef().reply(200, {
+        ref: `refs/tags/${tagName}`,
+        object: {type: 'blob', sha: 'blob-sha'},
+      });
+      await assert.rejects(
+        github.getTagByName(tagName),
+        /does not point to a commit/
+      );
+      req.done();
+    });
+
+    it('rejects a cyclic annotation chain', async () => {
+      tagRef().reply(200, {
+        ref: `refs/tags/${tagName}`,
+        object: {type: 'tag', sha: 'annotation'},
+      });
+      req.get('/repos/fake/fake/git/tags/annotation').reply(200, {
+        object: {type: 'tag', sha: 'annotation'},
+      });
+      await assert.rejects(
+        github.getTagByName(tagName),
+        /Cyclic annotation chain/
+      );
       req.done();
     });
   });

@@ -578,6 +578,10 @@ export class GitHub implements Scm {
     }
   }
 
+  async getTagByName(tagName: string): Promise<ScmTag | undefined> {
+    return this.gitHubApi.getTagByName(tagName);
+  }
+
   /**
    * Fetch the contents of a file from the configured branch
    *

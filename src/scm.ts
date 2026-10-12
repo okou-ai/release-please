@@ -126,6 +126,7 @@ export interface Scm {
   tagIterator(
     options?: ScmTagIteratorOptions
   ): AsyncGenerator<ScmTag, void, void>;
+  getTagByName(tagName: string): Promise<ScmTag | undefined>;
 
   createPullRequest(
     pullRequest: PullRequest,

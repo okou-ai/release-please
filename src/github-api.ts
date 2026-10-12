@@ -25,6 +25,7 @@ import {
   ScmReleaseIteratorOptions,
   ScmReleaseOptions,
   ScmCommitIteratorOptions,
+  ScmTag,
 } from './scm';
 import {
   GitHubAPIError,
@@ -165,6 +166,77 @@ export class GitHubApi {
     this.octokit = options.octokitAPIs.octokit;
     this.graphql = options.octokitAPIs.graphql;
     this.logger = options.logger ?? defaultLogger;
+  }
+
+  /**
+   * Resolve one exact tag ref to its commit without listing repository tags.
+   * Annotated tags may point to other annotated tags, so peel the entire chain.
+   */
+  async getTagByName(tagName: string): Promise<ScmTag | undefined> {
+    this.logger.debug(`Fetching tag ${tagName}`);
+    const reference = await this.readTagRequest(tagName, () =>
+      this.octokit.git.getRef({
+        owner: this.repository.owner,
+        repo: this.repository.repo,
+        ref: `tags/${tagName}`,
+      })
+    ).catch(error => {
+      if (error instanceof GitHubAPIError && error.status === 404) {
+        return undefined;
+      }
+      throw error;
+    });
+    if (!reference) return undefined;
+    if (reference.data.ref !== `refs/tags/${tagName}`) {
+      throw new Error(`Unexpected reference while resolving tag ${tagName}`);
+    }
+
+    let object = reference.data.object;
+    const visited = new Set<string>();
+    while (object.type === 'tag') {
+      if (visited.has(object.sha)) {
+        throw new Error(`Cyclic annotation chain for tag ${tagName}`);
+      }
+      visited.add(object.sha);
+      const tagSha = object.sha;
+      const annotation = await this.readTagRequest(tagName, () =>
+        this.octokit.git.getTag({
+          owner: this.repository.owner,
+          repo: this.repository.repo,
+          tag_sha: tagSha,
+        })
+      );
+      object = annotation.data.object;
+    }
+    if (object.type !== 'commit') {
+      throw new Error(`Tag ${tagName} does not point to a commit`);
+    }
+    return {name: tagName, sha: object.sha};
+  }
+
+  private async readTagRequest<T>(
+    tagName: string,
+    request: () => Promise<T>
+  ): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request();
+      } catch (error) {
+        if (!(error instanceof RequestError)) throw error;
+        const requestId = error.response?.headers['x-github-request-id'];
+        const failure = new GitHubAPIError(
+          error,
+          `Failed to resolve tag ${tagName} (HTTP ${error.status}${
+            requestId ? `, request ${requestId}` : ''
+          }): ${error.message || 'GitHub returned an empty error response'}`
+        );
+        if (attempt >= 2 || ![500, 502, 503, 504].includes(error.status)) {
+          throw failure;
+        }
+        this.logger.warn(`${failure.message}; retrying tag read`);
+        await sleepInMs(1000 * 2 ** attempt);
+      }
+    }
   }
 
   static createDefaultAgent(baseUrl: string, defaultProxy?: ProxyOption) {

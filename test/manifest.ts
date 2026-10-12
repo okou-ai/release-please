@@ -3385,12 +3385,19 @@ describe('Manifest', () => {
 
     it('should fallback to tagged version', async () => {
       mockReleases(sandbox, github, []);
-      mockTags(sandbox, github, [
-        {
-          name: 'pkg1-v1.0.0',
-          sha: 'abc123',
-        },
-      ]);
+      const tagIterator = sandbox
+        .stub(github, 'tagIterator')
+        .throws(new Error('Release backfill must not enumerate all tags'));
+      const tagRequest = nock('https://api.github.com')
+        .get(
+          uri =>
+            decodeURIComponent(uri) ===
+            '/repos/fake-owner/fake-repo/git/ref/tags/pkg1-v1.0.0'
+        )
+        .reply(200, {
+          ref: 'refs/tags/pkg1-v1.0.0',
+          object: {type: 'commit', sha: 'abc123'},
+        });
       mockCommits(sandbox, github, [
         {
           sha: 'def456',
@@ -3444,7 +3451,64 @@ describe('Manifest', () => {
       expect(pullRequest.headRefName).to.eql(
         'release-please--branches--main--components--pkg1'
       );
+      tagRequest.done();
+      sinon.assert.notCalled(tagIterator);
     });
+
+    for (const hasRootTag of [true, false]) {
+      it(`caches the root tag fallback when the tag is ${
+        hasRootTag ? 'present' : 'absent'
+      }`, async () => {
+        mockReleases(sandbox, github, []);
+        const tagIterator = mockTags(
+          sandbox,
+          github,
+          hasRootTag ? [{name: 'root-v1.0.0', sha: 'abc123'}] : []
+        );
+        tagIterator.throws(new Error('Unexpected tag enumeration'));
+        mockCommits(sandbox, github, [
+          {
+            sha: 'def456',
+            message: 'fix: update packages',
+            files: ['path/a/file', 'path/b/file'],
+          },
+          {sha: 'abc123', message: 'chore: release 1.0.0', files: []},
+        ]);
+        const manifest = new Manifest(
+          github,
+          'main',
+          {
+            '.': {releaseType: 'simple', component: 'root'},
+            'path/a': {
+              releaseType: 'simple',
+              component: 'a',
+              skipGithubRelease: true,
+            },
+            'path/b': {
+              releaseType: 'simple',
+              component: 'b',
+              skipGithubRelease: true,
+            },
+          },
+          {
+            '.': Version.parse('1.0.0'),
+            'path/a': Version.parse('1.0.0'),
+            'path/b': Version.parse('1.0.0'),
+          }
+        );
+        const pullRequests = await manifest.buildPullRequests();
+        expect(pullRequests).lengthOf(1);
+        if (hasRootTag) {
+          expect(pullRequests[0].version?.toString()).to.eql('1.0.1');
+        }
+        const tagLookup = github.getTagByName as sinon.SinonStub;
+        sinon.assert.callCount(tagLookup, 3);
+        for (const name of ['root-v1.0.0', 'a-v1.0.0', 'b-v1.0.0']) {
+          sinon.assert.calledOnceWithExactly(tagLookup.withArgs(name), name);
+        }
+        sinon.assert.notCalled(tagIterator);
+      });
+    }
 
     it('should handle mixing componentless configs', async () => {
       mockReleases(sandbox, github, [

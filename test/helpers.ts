@@ -402,6 +402,9 @@ export function mockTags(
   github: GitHub,
   tags: GitHubTag[]
 ): sinon.SinonStub {
+  sandbox
+    .stub(github, 'getTagByName')
+    .callsFake(async name => tags.find(tag => tag.name === name));
   async function* fakeGenerator() {
     for (const tag of tags) {
       yield tag;

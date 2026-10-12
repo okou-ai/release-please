@@ -933,7 +933,14 @@ export class Manifest {
     strategiesByPath: Record<string, Strategy>
   ): Promise<Record<string, Release>> {
     const releasesByPath: Record<string, Release> = {};
-    const allTags = await this.getAllTags();
+    const tags = new Map<string, ScmTag | undefined>();
+    const findTag = async (tag: TagName) => {
+      const name = tag.toString();
+      if (!tags.has(name)) {
+        tags.set(name, await this.github.getTagByName(name));
+      }
+      return tags.get(name);
+    };
     for (const path of missingPaths) {
       const expectedVersion = this.releasedVersions[path];
       if (!expectedVersion) {
@@ -948,7 +955,7 @@ export class Manifest {
         this.repositoryConfig[path].includeVInTag
       );
       this.logger.debug(`looking for tagName: ${expectedTag.toString()}`);
-      const foundTag = allTags[expectedTag.toString()];
+      const foundTag = await findTag(expectedTag);
       if (foundTag) {
         this.logger.debug(`found: ${foundTag.name} ${foundTag.sha}`);
         releasesByPath[path] = {
@@ -972,7 +979,7 @@ export class Manifest {
             this.repositoryConfig[ROOT_PROJECT_PATH].tagSeparator,
             this.repositoryConfig[ROOT_PROJECT_PATH].includeVInTag
           );
-          const foundTag = allTags[rootTag.toString()];
+          const foundTag = await findTag(rootTag);
           if (foundTag) {
             this.logger.debug(
               `found rootTag: ${foundTag.name} ${foundTag.sha}`
@@ -988,14 +995,6 @@ export class Manifest {
       }
     }
     return releasesByPath;
-  }
-
-  private async getAllTags(): Promise<Record<string, ScmTag>> {
-    const allTags: Record<string, ScmTag> = {};
-    for await (const tag of this.github.tagIterator()) {
-      allTags[tag.name] = tag;
-    }
-    return allTags;
   }
 
   /**
