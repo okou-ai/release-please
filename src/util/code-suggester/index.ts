@@ -30,7 +30,8 @@ import {openPullRequest} from './github/open-pull-request';
 import {addLabels} from './github/labels';
 
 /**
- * Make a new GitHub Pull Request with a set of changes applied on top of primary branch HEAD.
+ * Make a new GitHub Pull Request with changes applied on top of options.baseSha,
+ * or the current primary branch HEAD when that immutable parent is omitted.
  * The changes are committed into a new branch based on the upstream repository options using the authenticated Octokit account.
  * Then a Pull Request is made from that branch.
  *
@@ -111,7 +112,8 @@ async function createPullRequest(
         origin,
         upstream,
         originBranch.branch,
-        gitHubConfigs.primary
+        gitHubConfigs.primary,
+        options.baseSha
       ),
     {
       retries: options.retry,

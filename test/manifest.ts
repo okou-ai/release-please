@@ -162,9 +162,14 @@ describe('Manifest', () => {
       token: 'fake-token',
       fetch,
     });
+    nock('https://api.github.com')
+      .get(/\/repos\/fake-owner\/fake-repo\/git\/ref\/heads%2F[^/]+$/)
+      .optionally()
+      .reply(200, {object: {type: 'commit', sha: 'b'.repeat(40)}});
   });
   afterEach(() => {
     sandbox.restore();
+    nock.cleanAll();
   });
 
   describe('fromManifest', () => {

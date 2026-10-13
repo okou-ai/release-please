@@ -64,12 +64,14 @@ export interface LocalGitHubCreateOptions extends GitHubCreateOptions {
 /**
  * LocalGitHub implements the Scm interface using a local git clone
  * where possible, and falling back to the GitHub API for other operations.
+ * Ref names are resolved once per instance to keep a consistent commit snapshot.
  */
 export class LocalGitHub implements Scm {
   readonly repository: Repository;
   private cloneDir: string;
   private gitHubApi: GitHubApi;
   private logger: Logger;
+  private refShas = new Map<string, Promise<string>>();
 
   constructor(
     repository: Repository,
@@ -192,21 +194,84 @@ export class LocalGitHub implements Scm {
     });
   }
 
-  private async ensureRef(ref: string): Promise<string> {
-    try {
-      await execFile('git', ['rev-parse', '--verify', ref], {
-        cwd: this.cloneDir,
+  private ensureRef(ref: string): Promise<string> {
+    let pending = this.refShas.get(ref);
+    if (!pending) {
+      pending = this.resolveSnapshot(ref).catch(error => {
+        this.refShas.delete(ref);
+        throw error;
       });
-      return ref;
+      this.refShas.set(ref, pending);
+    }
+    return pending;
+  }
+
+  private async resolveSnapshot(ref: string): Promise<string> {
+    let fullName: string;
+    try {
+      const {stdout} = await execFile(
+        'git',
+        ['rev-parse', '--symbolic-full-name', '--verify', ref],
+        {cwd: this.cloneDir}
+      );
+      // Literal commit IDs and revision expressions have no symbolic name.
+      fullName = stdout.trim() || ref;
+    } catch {
+      if (ref.startsWith('refs/')) return this.resolveRef(ref);
+      try {
+        const {stdout} = await execFile(
+          'git',
+          ['ls-remote', '--refs', '--exit-code', '--', 'origin', ref],
+          {cwd: this.cloneDir}
+        );
+        const names = stdout
+          .trim()
+          .split('\n')
+          .map(line => line.split('\t')[1]);
+        fullName =
+          [`refs/heads/${ref}`, `refs/tags/${ref}`, ref].find(name =>
+            names.includes(name)
+          ) ?? ref;
+      } catch {
+        return this.resolveRef(ref);
+      }
+    }
+    return fullName === ref ? this.resolveRef(ref) : this.ensureRef(fullName);
+  }
+
+  private async resolveRef(ref: string): Promise<string> {
+    try {
+      const {stdout} = await execFile(
+        'git',
+        ['rev-parse', '--verify', `${ref}^{commit}`],
+        {cwd: this.cloneDir}
+      );
+      return stdout.trim();
     } catch (err) {
       this.logger.debug(
         `Ref ${ref} not found locally, trying to fetch from origin...`
       );
       try {
-        await execFile('git', ['fetch', 'origin', '--', ref], {
-          cwd: this.cloneDir,
-        });
-        return 'FETCH_HEAD';
+        // Separate tracking refs avoid races between concurrent FETCH_HEAD reads.
+        const trackingRef = `refs/remotes/origin/${ref}`;
+        await execFile(
+          'git',
+          [
+            'fetch',
+            '--no-tags',
+            '--no-write-fetch-head',
+            'origin',
+            '--',
+            `+${ref}:${trackingRef}`,
+          ],
+          {cwd: this.cloneDir}
+        );
+        const {stdout} = await execFile(
+          'git',
+          ['rev-parse', '--verify', `${trackingRef}^{commit}`],
+          {cwd: this.cloneDir}
+        );
+        return stdout.trim();
       } catch (fetchErr) {
         throw err; // Throw original error if fetch fails
       }
@@ -767,6 +832,7 @@ export class LocalGitHub implements Scm {
         branch: pullRequest.headBranchName,
         description: pullRequest.body,
         primary: targetBranch,
+        baseSha: changes.size ? await this.ensureRef(targetBranch) : undefined,
         force: true,
         fork: !!options?.fork,
         message,
@@ -833,6 +899,7 @@ export class LocalGitHub implements Scm {
         branch: pullRequest.headRefName,
         description: body,
         primary: targetBranch,
+        baseSha: changes.size ? await this.ensureRef(targetBranch) : undefined,
         force: true,
         fork: options?.fork === false ? false : true,
         message,
@@ -936,7 +1003,8 @@ export class LocalGitHub implements Scm {
       filename,
       contents,
       newBranchName,
-      baseBranchName
+      baseBranchName,
+      await this.ensureRef(baseBranchName)
     );
   }
 

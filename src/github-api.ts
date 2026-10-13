@@ -905,16 +905,19 @@ export class GitHubApi {
    * @param {string} newBranchName Name of the new branch
    * @param {string} baseBranchName Name of the base branch (where
    *   new branch is forked from)
+   * @param {string} baseSha Optional immutable source commit. Defaults to the
+   *   current base branch head when omitted.
    * @returns {string} HTML URL of the new file
    */
   async createFileOnNewBranch(
     filename: string,
     contents: string,
     newBranchName: string,
-    baseBranchName: string
+    baseBranchName: string,
+    baseSha?: string
   ): Promise<string> {
-    // create or update new branch to match base branch
-    await this.forkBranch(newBranchName, baseBranchName);
+    // Create or update the branch at the source commit, or the base branch head.
+    await this.forkBranch(newBranchName, baseBranchName, baseSha);
 
     // use the single file upload API
     const {
@@ -936,9 +939,10 @@ export class GitHubApi {
    */
   private async forkBranch(
     targetBranchName: string,
-    baseBranchName: string
+    baseBranchName: string,
+    baseSha?: string
   ): Promise<string> {
-    const baseBranchSha = await this.getBranchSha(baseBranchName);
+    const baseBranchSha = baseSha ?? (await this.getBranchSha(baseBranchName));
     if (!baseBranchSha) {
       throw new ConfigurationError(
         `Unable to find base branch: ${baseBranchName}`,

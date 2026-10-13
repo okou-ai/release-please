@@ -47,6 +47,14 @@ const fetch = require('node-fetch');
 
 const fixturesPath = './test/fixtures';
 const sandbox = sinon.createSandbox();
+const baseSha = 'b'.repeat(40);
+
+function commitHistoryFixture(name: string) {
+  const response = JSON.parse(
+    readFileSync(resolve(fixturesPath, name), 'utf8')
+  );
+  return {repository: {object: response.repository.ref?.target ?? null}};
+}
 
 describe('GitHub', () => {
   let github: GitHub;
@@ -54,6 +62,12 @@ describe('GitHub', () => {
 
   function getNock() {
     return nock('https://api.github.com/')
+      .get('/repos/fake/fake/git/ref/heads%2Fmain')
+      .optionally()
+      .reply(200, {
+        ref: 'refs/heads/main',
+        object: {type: 'commit', sha: baseSha},
+      })
       .get('/repos/fake/fake')
       .optionally()
       .reply(200, {
@@ -76,6 +90,7 @@ describe('GitHub', () => {
   });
   afterEach(() => {
     sandbox.restore();
+    nock.cleanAll();
   });
 
   describe('create', () => {
@@ -140,7 +155,7 @@ describe('GitHub', () => {
         readFileSync(resolve(fixturesPath, 'pom-file-search.json'), 'utf8')
       );
       req
-        .get('/repos/fake/fake/git/trees/main?recursive=true')
+        .get(`/repos/fake/fake/git/trees/${baseSha}?recursive=true`)
         .reply(200, fileSearchResponse);
       const pomFiles = await github.findFilesByFilename('pom.xml');
       snapshot(pomFiles);
@@ -165,7 +180,7 @@ describe('GitHub', () => {
           )
         );
         req
-          .get('/repos/fake/fake/git/trees/main?recursive=true')
+          .get(`/repos/fake/fake/git/trees/${baseSha}?recursive=true`)
           .reply(200, fileSearchResponse);
         const pomFiles = await github.findFilesByFilename('pom.xml', prefix);
         req.done();
@@ -180,7 +195,7 @@ describe('GitHub', () => {
         readFileSync(resolve(fixturesPath, 'pom-file-search.json'), 'utf8')
       );
       req
-        .get('/repos/fake/fake/git/trees/main?recursive=true')
+        .get(`/repos/fake/fake/git/trees/${baseSha}?recursive=true`)
         .reply(200, fileSearchResponse);
       const pomFiles = await github.findFilesByExtension('xml');
       snapshot(pomFiles);
@@ -205,7 +220,7 @@ describe('GitHub', () => {
           )
         );
         req
-          .get('/repos/fake/fake/git/trees/main?recursive=true')
+          .get(`/repos/fake/fake/git/trees/${baseSha}?recursive=true`)
           .reply(200, fileSearchResponse);
         const pomFiles = await github.findFilesByExtension('xml', prefix);
         req.done();
@@ -220,7 +235,7 @@ describe('GitHub', () => {
         )
       );
       req
-        .get('/repos/fake/fake/git/trees/main?recursive=true')
+        .get(`/repos/fake/fake/git/trees/${baseSha}?recursive=true`)
         .reply(200, fileSearchResponse);
       const pomFiles = await github.findFilesByExtension('xml', 'appengine');
       req.done();
@@ -241,7 +256,7 @@ describe('GitHub', () => {
         )
       );
       req = req
-        .get('/repos/fake/fake/git/trees/main?recursive=true')
+        .get(`/repos/fake/fake/git/trees/${baseSha}?recursive=true`)
         .reply(200, dataAPITreesResponse);
     });
     it('should support Github Data API in case of a big file', async () => {
@@ -376,9 +391,7 @@ describe('GitHub', () => {
 
   describe('commitsSince', () => {
     it('finds commits up until a condition', async () => {
-      const graphql = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since.json'), 'utf8')
-      );
+      const graphql = commitHistoryFixture('commits-since.json');
       req.post('/graphql').reply(200, {
         data: graphql,
       });
@@ -396,12 +409,8 @@ describe('GitHub', () => {
     });
 
     it('paginates through commits', async () => {
-      const graphql1 = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since-page-1.json'), 'utf8')
-      );
-      const graphql2 = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since-page-2.json'), 'utf8')
-      );
+      const graphql1 = commitHistoryFixture('commits-since-page-1.json');
+      const graphql2 = commitHistoryFixture('commits-since-page-2.json');
       req
         .post('/graphql')
         .reply(200, {
@@ -425,9 +434,7 @@ describe('GitHub', () => {
     });
 
     it('finds first commit of a multi-commit merge pull request', async () => {
-      const graphql = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since.json'), 'utf8')
-      );
+      const graphql = commitHistoryFixture('commits-since.json');
       req.post('/graphql').reply(200, {
         data: graphql,
       });
@@ -445,9 +452,7 @@ describe('GitHub', () => {
     });
 
     it('limits pagination', async () => {
-      const graphql1 = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since-page-1.json'), 'utf8')
-      );
+      const graphql1 = commitHistoryFixture('commits-since-page-1.json');
       req.post('/graphql').reply(200, {
         data: graphql1,
       });
@@ -468,12 +473,7 @@ describe('GitHub', () => {
     });
 
     it('returns empty commits if branch does not exist', async () => {
-      const graphql = JSON.parse(
-        readFileSync(
-          resolve(fixturesPath, 'commits-since-missing-branch.json'),
-          'utf8'
-        )
-      );
+      const graphql = commitHistoryFixture('commits-since-missing-branch.json');
       req.post('/graphql').reply(200, {
         data: graphql,
       });
@@ -489,9 +489,7 @@ describe('GitHub', () => {
     });
 
     it('backfills commit files without pull requests', async () => {
-      const graphql = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since.json'), 'utf8')
-      );
+      const graphql = commitHistoryFixture('commits-since.json');
       req
         .post('/graphql')
         .reply(200, {
@@ -524,12 +522,7 @@ describe('GitHub', () => {
     });
 
     it('backfills commit files for pull requests with lots of files', async () => {
-      const graphql = JSON.parse(
-        readFileSync(
-          resolve(fixturesPath, 'commits-since-many-files.json'),
-          'utf8'
-        )
-      );
+      const graphql = commitHistoryFixture('commits-since-many-files.json');
       req
         .post('/graphql')
         .reply(200, {
@@ -554,9 +547,7 @@ describe('GitHub', () => {
     });
 
     it('backfills commit files for pull requests rebased and merged', async () => {
-      const graphql = JSON.parse(
-        readFileSync(resolve(fixturesPath, 'commits-since-rebase.json'), 'utf8')
-      );
+      const graphql = commitHistoryFixture('commits-since-rebase.json');
       req
         .post('/graphql')
         .reply(200, {
@@ -589,12 +580,7 @@ describe('GitHub', () => {
 
   describe('mergeCommitIterator', () => {
     it('handles merged pull requests without files', async () => {
-      const graphql = JSON.parse(
-        readFileSync(
-          resolve(fixturesPath, 'commits-since-no-files.json'),
-          'utf8'
-        )
-      );
+      const graphql = commitHistoryFixture('commits-since-no-files.json');
       req.post('/graphql').reply(200, {
         data: graphql,
       });
@@ -1102,20 +1088,16 @@ describe('GitHub', () => {
     it('forks a new branch if the branch does not exist', async () => {
       req = req
         .get('/repos/fake/fake/git/ref/heads%2Fbase-branch')
-        .reply(200, {
-          object: {
-            sha: 'abc123',
-          },
-        })
+        .reply(200, {object: {type: 'commit', sha: baseSha}})
         .get('/repos/fake/fake/git/ref/heads%2Fnew-branch')
         .reply(404)
         .post('/repos/fake/fake/git/refs', body => {
           expect(body.ref).to.eql('refs/heads/new-branch');
-          expect(body.sha).to.eql('abc123');
+          expect(body.sha).to.eql(baseSha);
           return body;
         })
         .reply(201, {
-          object: {sha: 'abc123'},
+          object: {sha: baseSha},
         })
         .put('/repos/fake/fake/contents/new-file.txt', body => {
           expect(body.message).to.eql('Saving release notes');
@@ -1141,11 +1123,7 @@ describe('GitHub', () => {
     it('reuses an existing branch', async () => {
       req = req
         .get('/repos/fake/fake/git/ref/heads%2Fbase-branch')
-        .reply(200, {
-          object: {
-            sha: 'abc123',
-          },
-        })
+        .reply(200, {object: {type: 'commit', sha: baseSha}})
         .get('/repos/fake/fake/git/ref/heads%2Fnew-branch')
         .reply(200, {
           object: {
@@ -1154,11 +1132,11 @@ describe('GitHub', () => {
         })
         .patch('/repos/fake/fake/git/refs/heads%2Fnew-branch', body => {
           expect(body.force).to.be.true;
-          expect(body.sha).to.eql('abc123');
+          expect(body.sha).to.eql(baseSha);
           return body;
         })
         .reply(200, {
-          object: {sha: 'abc123'},
+          object: {sha: baseSha},
         })
         .put('/repos/fake/fake/contents/new-file.txt', body => {
           expect(body.message).to.eql('Saving release notes');
@@ -1425,10 +1403,13 @@ describe('GitHub', () => {
         clock.tick(10000);
       }, 10);
 
-      await assert.rejects(promise, (error: Error) => {
-        return error instanceof GitHubAPIError && error.status === 502;
-      });
-      realClearInterval(tickInterval);
+      try {
+        await assert.rejects(promise, (error: Error) => {
+          return error instanceof GitHubAPIError && error.status === 502;
+        });
+      } finally {
+        realClearInterval(tickInterval);
+      }
       req.done();
     });
   });

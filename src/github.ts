@@ -140,6 +140,7 @@ export class GitHub implements Scm {
   private fileCache: RepositoryFileCache;
   private logger: Logger;
   private gitHubApi: GitHubApi;
+  private refShas = new Map<string, Promise<string>>();
 
   private constructor(options: GitHubOptions) {
     this.repository = options.repository;
@@ -156,6 +157,81 @@ export class GitHub implements Scm {
 
   getGitHubApi(): GitHubApi {
     return this.gitHubApi;
+  }
+
+  // Resolve each ref once, including concurrent readers, so files, history and
+  // generated commits all use the same immutable repository snapshot.
+  private getRefSha(ref: string): Promise<string> {
+    if (/^[a-f\d]{40}$/i.test(ref)) return Promise.resolve(ref);
+    const cached = this.refShas.get(ref);
+    if (cached) return cached;
+    if (ref.startsWith('refs/') && !ref.startsWith('refs/heads/')) {
+      return this.getObjectSha(ref);
+    }
+
+    // Branch names and their fully qualified form identify the same snapshot.
+    // Keep the branch namespace separate from tags with the same name.
+    const branchRef = ref.startsWith('refs/heads/') ? ref : `refs/heads/${ref}`;
+    const snapshot = this.getCachedRefSha(branchRef, async () => {
+      const {data} = await this.octokit.git.getRef({
+        owner: this.repository.owner,
+        repo: this.repository.repo,
+        ref: branchRef.slice('refs/'.length),
+      });
+      return data.object?.sha;
+    });
+    if (ref === branchRef) return snapshot;
+    return snapshot.catch(error => {
+      if (
+        !(error instanceof RequestError) ||
+        (error.status !== 404 && error.status !== 422)
+      ) {
+        throw error;
+      }
+      // Retain reads of tag names and Git revision expressions. A missing
+      // branch must not cache a tag's commit under its qualified branch name.
+      const objectRef =
+        /[~^:]|^(HEAD$|heads\/|tags\/|remotes\/)|^[a-f\d]{4,39}$/i.test(ref)
+          ? ref
+          : `refs/tags/${ref}`;
+      return objectRef === ref
+        ? this.getObjectSha(ref)
+        : this.getCachedRefSha(ref, () => this.getObjectSha(objectRef));
+    });
+  }
+
+  private getObjectSha(ref: string): Promise<string> {
+    return this.getCachedRefSha(ref, async () => {
+      const response = await this.octokit.repos.getCommit({
+        owner: this.repository.owner,
+        repo: this.repository.repo,
+        ref,
+        headers: {accept: 'application/vnd.github.sha'},
+      });
+      return response.data;
+    });
+  }
+
+  private getCachedRefSha(
+    ref: string,
+    resolve: () => Promise<unknown>
+  ): Promise<string> {
+    let pending = this.refShas.get(ref);
+    if (!pending) {
+      pending = resolve()
+        .then(sha => {
+          if (typeof sha !== 'string' || !/^[a-f\d]{40}$/i.test(sha.trim())) {
+            throw new Error(`Could not resolve ${ref} to a commit SHA`);
+          }
+          return sha.trim();
+        })
+        .catch(error => {
+          this.refShas.delete(ref);
+          throw error;
+        });
+      this.refShas.set(ref, pending);
+    }
+    return pending;
   }
 
   static async create(options: GitHubCreateOptions): Promise<GitHub> {
@@ -246,53 +322,58 @@ export class GitHub implements Scm {
     this.logger.debug(
       `Fetching merge commits on branch ${targetBranch} with cursor: ${cursor}`
     );
+    let sha: string;
+    try {
+      sha = await this.getRefSha(targetBranch);
+    } catch (error) {
+      if (error instanceof RequestError && error.status === 404) return null;
+      throw error;
+    }
     const query = `query pullRequestsSince($owner: String!, $repo: String!, $num: Int!, $maxFilesChanged: Int, $targetBranch: String!, $cursor: String) {
       repository(owner: $owner, name: $repo) {
-        ref(qualifiedName: $targetBranch) {
-          target {
-            ... on Commit {
-              history(first: $num, after: $cursor) {
-                nodes {
-                  associatedPullRequests(first: 10) {
-                    nodes {
-                      number
-                      title
-                      baseRefName
-                      headRefName
-                      labels(first: 10) {
-                        nodes {
-                          name
-                        }
+        object(expression: $targetBranch) {
+          ... on Commit {
+            history(first: $num, after: $cursor) {
+              nodes {
+                associatedPullRequests(first: 10) {
+                  nodes {
+                    number
+                    title
+                    baseRefName
+                    headRefName
+                    labels(first: 10) {
+                      nodes {
+                        name
                       }
-                      body
-                      mergeCommit {
-                        oid
+                    }
+                    body
+                    mergeCommit {
+                      oid
+                    }
+                    files(first: $maxFilesChanged) {
+                      nodes {
+                        path
                       }
-                      files(first: $maxFilesChanged) {
-                        nodes {
-                          path
-                        }
-                        pageInfo {
-                          endCursor
-                          hasNextPage
-                        }
+                      pageInfo {
+                        endCursor
+                        hasNextPage
                       }
                     }
                   }
-                  sha: oid
-                  message
-                  author {
-                    name
-                    email
-                    user {
-                      login
-                    }
+                }
+                sha: oid
+                message
+                author {
+                  name
+                  email
+                  user {
+                    login
                   }
                 }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
               }
             }
           }
@@ -304,7 +385,7 @@ export class GitHub implements Scm {
       owner: this.repository.owner,
       repo: this.repository.repo,
       num: options.batchSize ?? 10,
-      targetBranch,
+      targetBranch: sha,
       maxFilesChanged: 100, // max is 100
     };
     const response = await this.graphqlRequest({
@@ -320,14 +401,14 @@ export class GitHub implements Scm {
       return null;
     }
 
-    // if the branch does exist, return null
-    if (!response.repository?.ref) {
+    // If the commit does not exist, return null.
+    if (!response.repository?.object) {
       this.logger.warn(
         `Could not find commits for branch ${targetBranch} - it likely does not exist.`
       );
       return null;
     }
-    const history = response.repository.ref.target.history;
+    const history = response.repository.object.history;
     const commits = (history.nodes || []) as GraphQLCommit[];
     // Count the number of pull requests associated with each merge commit. This is
     // used in the next step to make sure we only find pull requests with a
@@ -611,7 +692,10 @@ export class GitHub implements Scm {
   ): Promise<GitHubFileContents> {
     this.logger.debug(`Fetching ${path} from branch ${branch}`);
     try {
-      return await this.fileCache.getFileContents(path, branch);
+      return await this.fileCache.getFileContents(
+        path,
+        await this.getRefSha(branch)
+      );
     } catch (e) {
       if (e instanceof MissingFileError) {
         throw new FileNotFoundError(path);
@@ -670,7 +754,11 @@ export class GitHub implements Scm {
       this.logger.debug(
         `finding files by filename: ${filename}, ref: ${ref}, prefix: ${prefix}`
       );
-      return await this.fileCache.findFilesByFilename(filename, ref, prefix);
+      return await this.fileCache.findFilesByFilename(
+        filename,
+        await this.getRefSha(ref),
+        prefix
+      );
     }
   );
 
@@ -712,7 +800,11 @@ export class GitHub implements Scm {
       this.logger.debug(
         `finding files by glob: ${glob}, ref: ${ref}, prefix: ${prefix}`
       );
-      return await this.fileCache.findFilesByGlob(glob, ref, prefix);
+      return await this.fileCache.findFilesByGlob(
+        glob,
+        await this.getRefSha(ref),
+        prefix
+      );
     }
   );
 
@@ -741,6 +833,7 @@ export class GitHub implements Scm {
       branch: pullRequest.headBranchName,
       description: pullRequest.body,
       primary: targetBranch,
+      baseSha: changes.size ? await this.getRefSha(targetBranch) : undefined,
       force: true,
       fork: !!options?.fork,
       message,
@@ -817,6 +910,7 @@ export class GitHub implements Scm {
       branch: releasePullRequest.headRefName,
       description: body,
       primary: targetBranch,
+      baseSha: changes.size ? await this.getRefSha(targetBranch) : undefined,
       force: true,
       fork: options?.fork === false ? false : true,
       message,
@@ -874,7 +968,7 @@ export class GitHub implements Scm {
       if (updatedContent) {
         changes.set(update.path, {
           content: updatedContent,
-          originalContent: content?.parsedContent || null,
+          originalContent: content?.parsedContent ?? null,
           mode: content?.mode || DEFAULT_FILE_MODE,
         });
       }
@@ -905,7 +999,11 @@ export class GitHub implements Scm {
       if (prefix) {
         prefix = normalizePrefix(prefix);
       }
-      return this.fileCache.findFilesByExtension(extension, ref, prefix);
+      return this.fileCache.findFilesByExtension(
+        extension,
+        await this.getRefSha(ref),
+        prefix
+      );
     }
   );
 
@@ -1017,7 +1115,8 @@ export class GitHub implements Scm {
       filename,
       contents,
       newBranchName,
-      baseBranchName
+      baseBranchName,
+      await this.getRefSha(baseBranchName)
     );
   }
 }
